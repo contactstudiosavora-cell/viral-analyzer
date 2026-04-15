@@ -1278,9 +1278,6 @@ export default function Home() {
           </p>
         </div>
 
-        {/* ── ALERTES TENDANCES ── */}
-        <AlertesPanel />
-
         {/* ── MODE SELECTOR ── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {modes.map((m) => {
@@ -1323,6 +1320,9 @@ export default function Home() {
             );
           })}
         </div>
+
+        {/* ── ALERTES TENDANCES ── */}
+        <AlertesPanel />
 
         {/* ── FORM ── */}
         {mode && (
