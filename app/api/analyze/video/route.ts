@@ -1,15 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import ffmpeg from "fluent-ffmpeg";
-import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import os from "os";
 
-// Use bundled ffmpeg binary (works on Vercel)
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-
+const execFileAsync = promisify(execFile);
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+/* ── Get ffmpeg path (bundled via @ffmpeg-installer) ── */
+function getFfmpegPath(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const installer = require("@ffmpeg-installer/ffmpeg");
+    return installer.path;
+  } catch {
+    return "ffmpeg"; // fallback to system ffmpeg
+  }
+}
+
+const FFMPEG = getFfmpegPath();
 
 /* ── Platform detection ── */
 function detectPlatform(url: string): string {
@@ -21,7 +32,7 @@ function detectPlatform(url: string): string {
   return "Social Media";
 }
 
-/* ── Get direct video URL via cobalt.tools (no binary needed) ── */
+/* ── Get direct video URL via cobalt.tools ── */
 async function getDirectVideoUrl(url: string): Promise<string> {
   const res = await fetch("https://api.cobalt.tools/", {
     method: "POST",
@@ -33,31 +44,25 @@ async function getDirectVideoUrl(url: string): Promise<string> {
     signal: AbortSignal.timeout(30_000),
   });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`cobalt.tools ${res.status}: ${text.slice(0, 200)}`);
-  }
+  if (!res.ok) throw new Error(`cobalt.tools erreur ${res.status}`);
 
   const data = await res.json();
 
-  // Handle different cobalt response statuses
   if (data.status === "error") {
-    throw new Error(data.error?.code || data.text || "Lien non supporté par cobalt.tools");
+    throw new Error(data.error?.code || data.text || "Lien non supporté");
   }
 
-  // "redirect" or "tunnel" = direct video URL
   if (data.url) return data.url;
   if (data.tunnel) return data.tunnel;
 
-  // "picker" = multiple items (e.g. Instagram carousel), take first video
   if (data.status === "picker" && Array.isArray(data.picker)) {
-    const video = data.picker.find((p: { type?: string; url?: string }) =>
-      p.type === "video" || p.url
+    const video = data.picker.find(
+      (p: { type?: string; url?: string }) => p.type === "video" || p.url
     );
     if (video?.url) return video.url;
   }
 
-  throw new Error("Impossible d'extraire l'URL directe de la vidéo");
+  throw new Error("Impossible d'extraire l'URL directe");
 }
 
 /* ── Download video from direct URL ── */
@@ -65,8 +70,7 @@ async function downloadFromUrl(directUrl: string, destPath: string): Promise<voi
   const res = await fetch(directUrl, {
     headers: {
       "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      Referer: "https://www.tiktok.com/",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
     },
     signal: AbortSignal.timeout(90_000),
   });
@@ -74,48 +78,58 @@ async function downloadFromUrl(directUrl: string, destPath: string): Promise<voi
   if (!res.ok) throw new Error(`Téléchargement échoué : HTTP ${res.status}`);
 
   const buffer = await res.arrayBuffer();
-  if (buffer.byteLength < 10_000) throw new Error("Vidéo trop petite ou inaccessible");
+  if (buffer.byteLength < 5_000) throw new Error("Vidéo inaccessible ou trop petite");
 
   fs.writeFileSync(destPath, Buffer.from(buffer));
 }
 
-/* ── Extract 6 frames using fluent-ffmpeg (bundled binary) ── */
-async function extractFrames(videoPath: string, framesDir: string): Promise<string[]> {
-  // Get video duration via ffprobe
-  const duration = await new Promise<number>((resolve) => {
-    ffmpeg.ffprobe(videoPath, (err, meta) => {
-      const d = meta?.format?.duration;
-      resolve(!err && d && isFinite(Number(d)) ? Number(d) : 30);
-    });
-  });
+/* ── Get video duration via ffprobe ── */
+async function getVideoDuration(videoPath: string): Promise<number> {
+  try {
+    const ffprobePath = FFMPEG.replace(/ffmpeg(\.exe)?$/, "ffprobe$1");
+    const { stdout } = await execFileAsync(ffprobePath, [
+      "-v", "quiet",
+      "-print_format", "json",
+      "-show_format",
+      videoPath,
+    ]);
+    const info = JSON.parse(stdout);
+    return parseFloat(info.format?.duration) || 30;
+  } catch {
+    return 30;
+  }
+}
 
+/* ── Extract frames using bundled ffmpeg ── */
+async function extractFrames(videoPath: string, framesDir: string): Promise<string[]> {
+  const duration = await getVideoDuration(videoPath);
   const frameCount = 6;
   const framePaths: string[] = [];
 
   for (let i = 1; i <= frameCount; i++) {
-    const ts = parseFloat(((duration / (frameCount + 1)) * i).toFixed(2));
+    const ts = ((duration / (frameCount + 1)) * i).toFixed(2);
     const fp = path.join(framesDir, `frame_${i}.jpg`);
 
-    await new Promise<void>((resolve) => {
-      ffmpeg(videoPath)
-        .inputOptions([`-ss ${ts}`])
-        .outputOptions(["-vframes 1", "-q:v 2", "-f image2"])
-        .output(fp)
-        .on("end", resolve)
-        .on("error", (err) => {
-          console.warn(`Frame ${i} skipped:`, err.message);
-          resolve();
-        })
-        .run();
-    });
+    try {
+      await execFileAsync(FFMPEG, [
+        "-ss", ts,
+        "-i", videoPath,
+        "-vframes", "1",
+        "-q:v", "2",
+        "-y",
+        fp,
+      ], { timeout: 15_000 });
 
-    if (fs.existsSync(fp)) framePaths.push(fp);
+      if (fs.existsSync(fp)) framePaths.push(fp);
+    } catch {
+      // skip frame on error
+    }
   }
 
   return framePaths;
 }
 
-/* ── Send frames to Claude Vision ── */
+/* ── Claude Vision analysis ── */
 async function analyzeWithClaude(
   framePaths: string[],
   platform: string,
@@ -138,9 +152,7 @@ async function analyzeWithClaude(
       ? "Cette vidéo n'a pas marché. Analyse POURQUOI elle a échoué et ce qu'il faudrait changer."
       : "Cette vidéo n'a pas encore été postée. Donne un score de viralité et des recommandations avant publication.";
 
-  const ctxBlock = context?.trim()
-    ? `\nPRÉCISIONS : ${context}`
-    : "";
+  const ctxBlock = context?.trim() ? `\nPRÉCISIONS : ${context}` : "";
 
   const prompt = `Tu es un expert en analyse de contenu viral sur les réseaux sociaux.
 
@@ -155,22 +167,9 @@ Réponds UNIQUEMENT en JSON valide :
 {
   "plateforme": "${platform}",
   "verdict": "${performance === "viral" ? "✅ Vidéo virale" : performance === "flop" ? "❌ Vidéo en échec" : "🔍 Analyse pré-publication"}",
-  "score_viralite": {
-    "note": 7,
-    "label": "Bon potentiel",
-    "explication": "Explication courte"
-  },
-  "hook": {
-    "arrete_scroll": true,
-    "score": 8,
-    "analyse": "Ce que tu vois dans la première frame",
-    "technique": "Technique identifiée"
-  },
-  "structure": {
-    "rythme": "Analyse du rythme",
-    "clarte": "Clarté du message",
-    "storytelling": "Arc narratif"
-  },
+  "score_viralite": { "note": 7, "label": "Bon potentiel", "explication": "Explication courte" },
+  "hook": { "arrete_scroll": true, "score": 8, "analyse": "Analyse de la première frame", "technique": "Technique identifiée" },
+  "structure": { "rythme": "Analyse du rythme", "clarte": "Clarté du message", "storytelling": "Arc narratif" },
   "diagnostic_performance": {
     "raisons_principales": ["Raison 1", "Raison 2", "Raison 3"],
     "facteur_cle": "Le facteur le plus déterminant"
@@ -229,49 +228,39 @@ export async function POST(req: NextRequest) {
       context = (formData.get("context") as string) || "";
       platform = (formData.get("platform") as string) || "Social Media";
 
-      if (!file) {
-        return NextResponse.json({ error: "Fichier manquant" }, { status: 400 });
-      }
+      if (!file) return NextResponse.json({ error: "Fichier manquant" }, { status: 400 });
 
       const ext = file.name.split(".").pop() || "mp4";
       videoPath = path.join(tempDir, `video.${ext}`);
       fs.writeFileSync(videoPath, Buffer.from(await file.arrayBuffer()));
 
-    /* ── URL (cobalt.tools → download) ── */
+    /* ── URL ── */
     } else {
       const body = await req.json();
       const { url, context: ctx, performance: perf } = body;
       performance = perf || "unknown";
       context = ctx || "";
 
-      if (!url?.trim()) {
-        return NextResponse.json({ error: "URL requise" }, { status: 400 });
-      }
+      if (!url?.trim()) return NextResponse.json({ error: "URL requise" }, { status: 400 });
 
       platform = detectPlatform(url);
       videoPath = path.join(tempDir, "video.mp4");
 
-      // Step 1: resolve direct URL via cobalt.tools
       let directUrl: string;
       try {
         directUrl = await getDirectVideoUrl(url);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
         return NextResponse.json(
-          {
-            error: `Impossible de télécharger cette vidéo. Essaie d'uploader le fichier directement.\n\nDétail : ${msg}`,
-          },
+          { error: `Lien non supporté. Essaie d'uploader la vidéo directement.\n\nDétail : ${e instanceof Error ? e.message : String(e)}` },
           { status: 422 }
         );
       }
 
-      // Step 2: download from direct URL
       try {
         await downloadFromUrl(directUrl, videoPath);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
         return NextResponse.json(
-          { error: `Téléchargement échoué : ${msg}` },
+          { error: `Téléchargement échoué : ${e instanceof Error ? e.message : String(e)}` },
           { status: 500 }
         );
       }
@@ -281,7 +270,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Vidéo introuvable après téléchargement" }, { status: 500 });
     }
 
-    // Extract frames
     const framePaths = await extractFrames(videoPath, framesDir);
 
     if (framePaths.length === 0) {
@@ -291,22 +279,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Analyze
     const analysis = await analyzeWithClaude(framePaths, platform, performance, context);
-    return NextResponse.json({
-      analysis,
-      platform,
-      performance,
-      framesAnalyzed: framePaths.length,
-    });
+    return NextResponse.json({ analysis, platform, performance, framesAnalyzed: framePaths.length });
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("analyze/video error:", msg);
     return NextResponse.json({ error: msg }, { status: 500 });
   } finally {
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    } catch { /* ignore */ }
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }
