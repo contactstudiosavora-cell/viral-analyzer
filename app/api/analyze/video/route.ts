@@ -32,37 +32,75 @@ function detectPlatform(url: string): string {
   return "Social Media";
 }
 
+/* ── Clean URL before sending to cobalt ── */
+function cleanVideoUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    // Remove tracking params that confuse cobalt
+    ["is_from_webapp", "sender_device", "sender_web_id", "web_id", "utm_source",
+      "utm_medium", "utm_campaign", "refer", "referer", "source"].forEach((p) => u.searchParams.delete(p));
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 /* ── Get direct video URL via cobalt.tools ── */
 async function getDirectVideoUrl(url: string): Promise<string> {
-  const res = await fetch("https://api.cobalt.tools/", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({ url }),
-    signal: AbortSignal.timeout(30_000),
-  });
+  const cleanUrl = cleanVideoUrl(url);
 
-  if (!res.ok) throw new Error(`cobalt.tools erreur ${res.status}`);
+  // Try multiple cobalt instances in order
+  const instances = [
+    "https://api.cobalt.tools/",
+    "https://cobalt.tools/api/json",
+  ];
 
-  const data = await res.json();
+  let lastError = "";
 
-  if (data.status === "error") {
-    throw new Error(data.error?.code || data.text || "Lien non supporté");
+  for (const endpoint of instances) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 (compatible; viral-analyzer/1.0)",
+        },
+        body: JSON.stringify({ url: cleanUrl }),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (!res.ok) {
+        lastError = `cobalt erreur ${res.status}`;
+        continue;
+      }
+
+      const data = await res.json();
+
+      if (data.status === "error") {
+        lastError = data.error?.code || data.text || "Lien non supporté";
+        continue;
+      }
+
+      if (data.url) return data.url;
+      if (data.tunnel) return data.tunnel;
+
+      if (data.status === "picker" && Array.isArray(data.picker)) {
+        const video = data.picker.find(
+          (p: { type?: string; url?: string }) => p.type === "video" || p.url
+        );
+        if (video?.url) return video.url;
+      }
+
+      if (data.status === "redirect" && data.url) return data.url;
+
+      lastError = "Réponse inattendue de cobalt";
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+    }
   }
 
-  if (data.url) return data.url;
-  if (data.tunnel) return data.tunnel;
-
-  if (data.status === "picker" && Array.isArray(data.picker)) {
-    const video = data.picker.find(
-      (p: { type?: string; url?: string }) => p.type === "video" || p.url
-    );
-    if (video?.url) return video.url;
-  }
-
-  throw new Error("Impossible d'extraire l'URL directe");
+  throw new Error(lastError || "Impossible d'extraire l'URL directe");
 }
 
 /* ── Download video from direct URL ── */
