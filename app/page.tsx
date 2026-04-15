@@ -1035,7 +1035,7 @@ export default function Home() {
         </div>
       </nav>
 
-      <main className="max-w-2xl mx-auto px-4 py-16 space-y-12">
+      <main className="max-w-2xl mx-auto px-4 sm:px-6 py-10 sm:py-16 space-y-10 sm:space-y-12">
 
         {/* ── HERO ── */}
         <div className="space-y-5">

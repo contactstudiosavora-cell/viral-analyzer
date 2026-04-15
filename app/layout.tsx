@@ -13,6 +13,12 @@ export const metadata: Metadata = {
     "Analyse de tendances, vidéos virales et scripts pour TikTok, Instagram, Facebook et X.",
 };
 
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
