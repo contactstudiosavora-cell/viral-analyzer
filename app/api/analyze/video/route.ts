@@ -9,17 +9,15 @@ import os from "os";
 const execFileAsync = promisify(execFile);
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-/* ── Get ffmpeg path (bundled via @ffmpeg-installer) ── */
+/* ── Get ffmpeg path (bundled) ── */
 function getFfmpegPath(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const installer = require("@ffmpeg-installer/ffmpeg");
-    return installer.path;
+    return require("@ffmpeg-installer/ffmpeg").path;
   } catch {
-    return "ffmpeg"; // fallback to system ffmpeg
+    return "ffmpeg";
   }
 }
-
 const FFMPEG = getFfmpegPath();
 
 /* ── Platform detection ── */
@@ -32,92 +30,124 @@ function detectPlatform(url: string): string {
   return "Social Media";
 }
 
-/* ── Clean URL before sending to cobalt ── */
-function cleanVideoUrl(url: string): string {
+/* ── Clean tracking params from URL ── */
+function cleanUrl(url: string): string {
   try {
     const u = new URL(url);
-    // Remove tracking params that confuse cobalt
-    ["is_from_webapp", "sender_device", "sender_web_id", "web_id", "utm_source",
-      "utm_medium", "utm_campaign", "refer", "referer", "source"].forEach((p) => u.searchParams.delete(p));
+    ["is_from_webapp", "sender_device", "sender_web_id", "web_id",
+      "utm_source", "utm_medium", "utm_campaign", "refer", "source"].forEach(
+      (p) => u.searchParams.delete(p)
+    );
     return u.toString();
   } catch {
     return url;
   }
 }
 
-/* ── Get direct video URL via cobalt.tools ── */
-async function getDirectVideoUrl(url: string): Promise<string> {
-  const cleanUrl = cleanVideoUrl(url);
+/* ────────────────────────────────────────
+   METHOD 1 — TikWM (TikTok only, free)
+──────────────────────────────────────── */
+async function getTikTokDirectUrl(url: string): Promise<string> {
+  const res = await fetch(
+    `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`,
+    {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      signal: AbortSignal.timeout(15_000),
+    }
+  );
+  if (!res.ok) throw new Error(`tikwm ${res.status}`);
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(data.msg || "tikwm error");
+  // prefer no-watermark
+  const videoUrl = data.data?.play || data.data?.wmplay;
+  if (!videoUrl) throw new Error("tikwm: no video URL in response");
+  return videoUrl;
+}
 
-  // Try multiple cobalt instances in order
-  const instances = [
-    "https://api.cobalt.tools/",
-    "https://cobalt.tools/api/json",
-  ];
+/* ────────────────────────────────────────
+   METHOD 2 — Cobalt.tools (all platforms)
+──────────────────────────────────────── */
+async function getCobaltDirectUrl(url: string): Promise<string> {
+  const clean = cleanUrl(url);
 
-  let lastError = "";
+  const res = await fetch("https://api.cobalt.tools/", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ url: clean }),
+    signal: AbortSignal.timeout(25_000),
+  });
 
-  for (const endpoint of instances) {
+  const text = await res.text();
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`cobalt parse error: ${text.slice(0, 100)}`);
+  }
+
+  if (!res.ok || data.status === "error") {
+    throw new Error(
+      (data.error as { code?: string } | undefined)?.code ||
+        (data.text as string) ||
+        `cobalt ${res.status}`
+    );
+  }
+
+  if (data.url) return data.url as string;
+  if (data.tunnel) return data.tunnel as string;
+
+  if (data.status === "picker" && Array.isArray(data.picker)) {
+    const video = (data.picker as { type?: string; url?: string }[]).find(
+      (p) => p.type === "video" || p.url
+    );
+    if (video?.url) return video.url;
+  }
+
+  throw new Error("cobalt: no URL in response");
+}
+
+/* ────────────────────────────────────────
+   MAIN RESOLVER — tries best method first
+──────────────────────────────────────── */
+async function getDirectVideoUrl(url: string, platform: string): Promise<string> {
+  const errors: string[] = [];
+
+  // TikTok → try tikwm first (most reliable)
+  if (platform === "TikTok") {
     try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "User-Agent": "Mozilla/5.0 (compatible; viral-analyzer/1.0)",
-        },
-        body: JSON.stringify({ url: cleanUrl }),
-        signal: AbortSignal.timeout(30_000),
-      });
-
-      if (!res.ok) {
-        lastError = `cobalt erreur ${res.status}`;
-        continue;
-      }
-
-      const data = await res.json();
-
-      if (data.status === "error") {
-        lastError = data.error?.code || data.text || "Lien non supporté";
-        continue;
-      }
-
-      if (data.url) return data.url;
-      if (data.tunnel) return data.tunnel;
-
-      if (data.status === "picker" && Array.isArray(data.picker)) {
-        const video = data.picker.find(
-          (p: { type?: string; url?: string }) => p.type === "video" || p.url
-        );
-        if (video?.url) return video.url;
-      }
-
-      if (data.status === "redirect" && data.url) return data.url;
-
-      lastError = "Réponse inattendue de cobalt";
+      return await getTikTokDirectUrl(url);
     } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
+      errors.push(`tikwm: ${e instanceof Error ? e.message : e}`);
     }
   }
 
-  throw new Error(lastError || "Impossible d'extraire l'URL directe");
+  // All platforms → try cobalt
+  try {
+    return await getCobaltDirectUrl(url);
+  } catch (e) {
+    errors.push(`cobalt: ${e instanceof Error ? e.message : e}`);
+  }
+
+  throw new Error(`Impossible de télécharger la vidéo.\n${errors.join(" | ")}`);
 }
 
-/* ── Download video from direct URL ── */
-async function downloadFromUrl(directUrl: string, destPath: string): Promise<void> {
+/* ── Download video binary ── */
+async function downloadVideo(directUrl: string, destPath: string): Promise<void> {
   const res = await fetch(directUrl, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+      Referer: "https://www.tiktok.com/",
     },
     signal: AbortSignal.timeout(90_000),
   });
 
-  if (!res.ok) throw new Error(`Téléchargement échoué : HTTP ${res.status}`);
-
+  if (!res.ok) throw new Error(`Download HTTP ${res.status}`);
   const buffer = await res.arrayBuffer();
-  if (buffer.byteLength < 5_000) throw new Error("Vidéo inaccessible ou trop petite");
-
+  if (buffer.byteLength < 5_000) throw new Error("Fichier trop petit, vidéo inaccessible");
   fs.writeFileSync(destPath, Buffer.from(buffer));
 }
 
@@ -126,19 +156,15 @@ async function getVideoDuration(videoPath: string): Promise<number> {
   try {
     const ffprobePath = FFMPEG.replace(/ffmpeg(\.exe)?$/, "ffprobe$1");
     const { stdout } = await execFileAsync(ffprobePath, [
-      "-v", "quiet",
-      "-print_format", "json",
-      "-show_format",
-      videoPath,
+      "-v", "quiet", "-print_format", "json", "-show_format", videoPath,
     ]);
-    const info = JSON.parse(stdout);
-    return parseFloat(info.format?.duration) || 30;
+    return parseFloat(JSON.parse(stdout).format?.duration) || 30;
   } catch {
     return 30;
   }
 }
 
-/* ── Extract frames using bundled ffmpeg ── */
+/* ── Extract 6 frames ── */
 async function extractFrames(videoPath: string, framesDir: string): Promise<string[]> {
   const duration = await getVideoDuration(videoPath);
   const frameCount = 6;
@@ -147,27 +173,20 @@ async function extractFrames(videoPath: string, framesDir: string): Promise<stri
   for (let i = 1; i <= frameCount; i++) {
     const ts = ((duration / (frameCount + 1)) * i).toFixed(2);
     const fp = path.join(framesDir, `frame_${i}.jpg`);
-
     try {
-      await execFileAsync(FFMPEG, [
-        "-ss", ts,
-        "-i", videoPath,
-        "-vframes", "1",
-        "-q:v", "2",
-        "-y",
-        fp,
-      ], { timeout: 15_000 });
-
+      await execFileAsync(
+        FFMPEG,
+        ["-ss", ts, "-i", videoPath, "-vframes", "1", "-q:v", "2", "-y", fp],
+        { timeout: 15_000 }
+      );
       if (fs.existsSync(fp)) framePaths.push(fp);
-    } catch {
-      // skip frame on error
-    }
+    } catch { /* skip */ }
   }
 
   return framePaths;
 }
 
-/* ── Claude Vision analysis ── */
+/* ── Claude Vision ── */
 async function analyzeWithClaude(
   framePaths: string[],
   platform: string,
@@ -183,64 +202,57 @@ async function analyzeWithClaude(
     },
   }));
 
-  const perfContext =
+  const perfCtx =
     performance === "viral"
       ? "Cette vidéo a très bien performé. Analyse POURQUOI elle a marché."
       : performance === "flop"
       ? "Cette vidéo n'a pas marché. Analyse POURQUOI elle a échoué et ce qu'il faudrait changer."
-      : "Cette vidéo n'a pas encore été postée. Donne un score de viralité et des recommandations avant publication.";
-
-  const ctxBlock = context?.trim() ? `\nPRÉCISIONS : ${context}` : "";
+      : "Cette vidéo n'a pas encore été postée. Donne un score de viralité et des recommandations.";
 
   const prompt = `Tu es un expert en analyse de contenu viral sur les réseaux sociaux.
 
 PLATEFORME : ${platform}
-SITUATION : ${perfContext}${ctxBlock}
+SITUATION : ${perfCtx}
+${context?.trim() ? `PRÉCISIONS : ${context}` : ""}
 
-Je t'envoie ${framePaths.length} frames extraites dans l'ordre chronologique de la vidéo.
-Base ton analyse UNIQUEMENT sur ce que tu vois réellement dans les frames + le contexte fourni.
+Je t'envoie ${framePaths.length} frames dans l'ordre chronologique.
+Base ton analyse UNIQUEMENT sur ce que tu vois réellement.
 
 Réponds UNIQUEMENT en JSON valide :
-
 {
   "plateforme": "${platform}",
   "verdict": "${performance === "viral" ? "✅ Vidéo virale" : performance === "flop" ? "❌ Vidéo en échec" : "🔍 Analyse pré-publication"}",
   "score_viralite": { "note": 7, "label": "Bon potentiel", "explication": "Explication courte" },
-  "hook": { "arrete_scroll": true, "score": 8, "analyse": "Analyse de la première frame", "technique": "Technique identifiée" },
-  "structure": { "rythme": "Analyse du rythme", "clarte": "Clarté du message", "storytelling": "Arc narratif" },
+  "hook": { "arrete_scroll": true, "score": 8, "analyse": "Analyse", "technique": "Technique" },
+  "structure": { "rythme": "Rythme", "clarte": "Clarté", "storytelling": "Storytelling" },
   "diagnostic_performance": {
     "raisons_principales": ["Raison 1", "Raison 2", "Raison 3"],
-    "facteur_cle": "Le facteur le plus déterminant"
+    "facteur_cle": "Facteur clé"
   },
-  "points_forts": ["Point fort 1", "Point fort 2"],
-  "points_faibles": ["Point faible 1", "Point faible 2", "Point faible 3"],
+  "points_forts": ["Point 1", "Point 2"],
+  "points_faibles": ["Point 1", "Point 2", "Point 3"],
   "optimisations": [
-    { "element": "Hook", "probleme": "Ce qui ne marche pas", "solution": "Comment corriger" },
-    { "element": "Rythme", "probleme": "Ce qui ne marche pas", "solution": "Comment corriger" },
-    { "element": "CTA", "probleme": "Ce qui manque", "solution": "Recommandation" }
+    { "element": "Hook", "probleme": "Problème", "solution": "Solution" },
+    { "element": "Rythme", "probleme": "Problème", "solution": "Solution" },
+    { "element": "CTA", "probleme": "Problème", "solution": "Solution" }
   ],
-  "verdict_final": "Synthèse directe en 2-3 phrases",
+  "verdict_final": "Synthèse en 2-3 phrases",
   "bonus": {
     "hooks_optimises": ["Hook 1", "Hook 2", "Hook 3"],
-    "idee_video": "Comment retourner ce contenu sous un angle plus viral"
+    "idee_video": "Idée pour retourner ce contenu"
   }
 }`;
 
   const message = await client.messages.create({
     model: "claude-sonnet-4-5",
     max_tokens: 2048,
-    messages: [
-      {
-        role: "user",
-        content: [...imageBlocks, { type: "text", text: prompt }],
-      },
-    ],
+    messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: prompt }] }],
   });
 
   const raw = (message.content[0] as { type: string; text: string }).text.trim();
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("Erreur de parsing JSON");
-  return JSON.parse(jsonMatch[0]);
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("Erreur de parsing JSON");
+  return JSON.parse(match[0]);
 }
 
 /* ── Main handler ── */
@@ -286,16 +298,16 @@ export async function POST(req: NextRequest) {
 
       let directUrl: string;
       try {
-        directUrl = await getDirectVideoUrl(url);
+        directUrl = await getDirectVideoUrl(url, platform);
       } catch (e) {
         return NextResponse.json(
-          { error: `Lien non supporté. Essaie d'uploader la vidéo directement.\n\nDétail : ${e instanceof Error ? e.message : String(e)}` },
+          { error: `Impossible de télécharger cette vidéo. Essaie l'onglet Upload à la place.\n\nDétail : ${e instanceof Error ? e.message : String(e)}` },
           { status: 422 }
         );
       }
 
       try {
-        await downloadFromUrl(directUrl, videoPath);
+        await downloadVideo(directUrl, videoPath);
       } catch (e) {
         return NextResponse.json(
           { error: `Téléchargement échoué : ${e instanceof Error ? e.message : String(e)}` },
@@ -312,7 +324,7 @@ export async function POST(req: NextRequest) {
 
     if (framePaths.length === 0) {
       return NextResponse.json(
-        { error: "Impossible d'extraire les frames. Essaie un autre format de vidéo." },
+        { error: "Impossible d'extraire les frames. Essaie l'onglet Upload." },
         { status: 500 }
       );
     }
