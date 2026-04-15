@@ -11,7 +11,7 @@ async function safeFetch(url: string, opts: RequestInit = {}): Promise<Response 
     const res = await fetch(url, {
       ...opts,
       headers: { ...HEADERS, ...(opts.headers || {}) },
-      signal: AbortSignal.timeout(7000),
+      signal: AbortSignal.timeout(8000),
     });
     return res.ok ? res : null;
   } catch {
@@ -26,156 +26,205 @@ function formatNumber(n: number): string {
   return String(n);
 }
 
-// Filter out CSS hex colors and garbage strings
-function isRealHashtag(tag: string): boolean {
+function isRealTag(tag: string): boolean {
   const clean = tag.replace(/^#/, "");
-  // Reject pure hex colors (3, 4, 6, or 8 char hex)
-  if (/^[0-9a-fA-F]{3}$/.test(clean)) return false;
-  if (/^[0-9a-fA-F]{4}$/.test(clean)) return false;
-  if (/^[0-9a-fA-F]{6}$/.test(clean)) return false;
-  if (/^[0-9a-fA-F]{8}$/.test(clean)) return false;
-  // Reject pure numbers
+  if (/^[0-9a-fA-F]{3,8}$/.test(clean)) return false;
   if (/^\d+$/.test(clean)) return false;
-  // Must have at least 2 real characters
   if (clean.length < 2) return false;
   return true;
 }
 
-/* ── TikTok Creative Center hashtags ── */
-async function tiktokHashtags(): Promise<{ tag: string; views: string }[]> {
-  // Try FR first, then US
-  for (const country of ["FR", "US"]) {
-    const res = await safeFetch(
-      `https://ads.tiktok.com/creative_radar_api/v1/popular_trend/hashtag/list?period=7&page=1&limit=15&country_code=${country}&language=${country === "FR" ? "fr" : "en"}`,
-      { headers: { Referer: "https://ads.tiktok.com/business/creativecenter/trends/hashtag/pc/en" } }
-    );
-    if (!res) continue;
+/* ────────────────────────────────────────
+   TIKTOK — via Reddit r/TikTok + tiktokviral
+   (Creative Center blocks Vercel IPs)
+──────────────────────────────────────── */
+async function tiktokTrends(): Promise<{ tag: string; views: string }[]> {
+  // Method 1: scrape Reddit r/TikTok for trending topics
+  const res = await safeFetch(
+    "https://www.reddit.com/r/TikTok/hot.json?limit=15&raw_json=1"
+  );
+  if (res) {
     try {
       const json = await res.json();
-      const items = json?.data?.list?.slice(0, 8)?.map(
-        (h: { hashtag_name?: string; video_views?: number }) => ({
-          tag: `#${h.hashtag_name}`,
-          views: h.video_views ? formatNumber(h.video_views) + " vues" : "trending",
-        })
-      ) ?? [];
-      if (items.length > 0) return items;
-    } catch { continue; }
+      const posts = json?.data?.children ?? [];
+      const tags: { tag: string; views: string }[] = [];
+
+      for (const post of posts) {
+        const title: string = post.data?.title ?? "";
+        // Extract hashtags from titles
+        const found = [...title.matchAll(/#([\w\u00C0-\u017E]{2,25})/g)].map(m => `#${m[1]}`);
+        found.forEach(t => { if (isRealTag(t)) tags.push({ tag: t, views: "viral" }); });
+        // Also use post title as a trend if it's short enough
+        if (title.length < 50 && title.length > 5) {
+          tags.push({ tag: title.slice(0, 40), views: `${post.data?.score ?? 0} pts` });
+        }
+      }
+
+      const unique = [...new Map(tags.map(t => [t.tag, t])).values()].slice(0, 8);
+      if (unique.length > 0) return unique;
+    } catch { /* continue */ }
   }
-  return [];
-}
 
-/* ── TikTok Creative Center sounds ── */
-async function tiktokSounds(): Promise<{ name: string; count: string }[]> {
-  const res = await safeFetch(
-    "https://ads.tiktok.com/creative_radar_api/v1/popular_trend/sound/list?period=7&page=1&limit=5&country_code=US",
-    { headers: { Referer: "https://ads.tiktok.com/business/creativecenter/trends/sound/pc/en" } }
-  );
-  if (!res) return [];
-  try {
-    const json = await res.json();
-    return json?.data?.list?.slice(0, 4)?.map(
-      (s: { sound_name?: string; author_name?: string; video_count?: number }) => ({
-        name: `🎵 ${s.sound_name ?? "?"} — ${s.author_name ?? "?"}`,
-        count: s.video_count ? formatNumber(s.video_count) + " vidéos" : "trending",
-      })
-    ) ?? [];
-  } catch { return []; }
-}
-
-/* ── Twitter/X trends via trends24.in ── */
-async function twitterTrends(): Promise<{ tag: string; volume: string }[]> {
-  const res = await safeFetch("https://trends24.in/france/", { headers: { Accept: "text/html" } });
-  if (!res) return [];
-  try {
-    const html = await res.text();
-
-    // Strategy 1: grab trend-name class
-    const byClass = [
-      ...html.matchAll(/class="trend-name[^"]*"[^>]*>([^<]{2,60})</g),
-    ].map((m) => m[1].trim()).filter(Boolean);
-    if (byClass.length > 0) {
-      return [...new Set(byClass)]
-        .filter(isRealHashtag)
-        .slice(0, 8)
-        .map((t) => ({ tag: t, volume: "trending" }));
-    }
-
-    // Strategy 2: grab from list items in trend cards — only real words/hashtags
-    const listItems = [
-      ...html.matchAll(/<a[^>]+href="[^"]*"[^>]*>\s*(#?[\w\u00C0-\u017E][^\n<]{1,40}?)\s*<\/a>/g),
-    ]
-      .map((m) => m[1].trim())
-      .filter((t) => t.length > 2 && !t.includes("trends24") && isRealHashtag(t.startsWith("#") ? t : `#${t}`));
-
-    return [...new Set(listItems)].slice(0, 8).map((t) => ({ tag: t, volume: "trending" }));
-  } catch { return []; }
-}
-
-/* ── Instagram hashtags via display.net ── */
-async function instagramHashtags(): Promise<{ tag: string; level: string }[]> {
-  // Use a more reliable source: best-hashtags.com
-  const res = await safeFetch("https://best-hashtags.com/hashtag/instagram/", {
-    headers: { Accept: "text/html" },
-  });
-  if (!res) {
-    // Fallback: return curated popular Instagram hashtags
-    return [
-      { tag: "#reels", level: "🔥 très populaire" },
-      { tag: "#viral", level: "🔥 très populaire" },
-      { tag: "#trending", level: "populaire" },
-      { tag: "#explore", level: "populaire" },
-      { tag: "#instagood", level: "populaire" },
-      { tag: "#content", level: "populaire" },
-    ];
+  // Method 2: TikWM trending (public API)
+  const res2 = await safeFetch("https://www.tikwm.com/api/feed/list?count=10&cursor=0");
+  if (res2) {
+    try {
+      const json = await res2.json();
+      const items = json?.data?.videos ?? [];
+      const tags: { tag: string; views: string }[] = [];
+      for (const v of items.slice(0, 10)) {
+        const desc: string = v.title ?? v.desc ?? "";
+        const found = [...desc.matchAll(/#([\w\u00C0-\u017E]{2,25})/g)].map(m => `#${m[1]}`);
+        found.forEach(t => { if (isRealTag(t)) tags.push({ tag: t, views: v.play_count ? formatNumber(v.play_count) + " vues" : "viral" }); });
+      }
+      const unique = [...new Map(tags.map(t => [t.tag, t])).values()].slice(0, 8);
+      if (unique.length > 0) return unique;
+    } catch { /* continue */ }
   }
-  try {
-    const html = await res.text();
-    const tags = [
-      ...new Set(
-        [...html.matchAll(/#([\w\u00C0-\u017E]{3,25})/g)]
-          .map((m) => `#${m[1]}`)
-          .filter(isRealHashtag)
-      ),
-    ].slice(0, 8);
-    if (tags.length > 0) return tags.map((t) => ({ tag: t, level: "populaire" }));
 
-    // Static fallback
-    return [
-      { tag: "#reels", level: "🔥 très populaire" },
-      { tag: "#viral", level: "🔥 très populaire" },
-      { tag: "#trending", level: "populaire" },
-      { tag: "#explore", level: "populaire" },
-      { tag: "#instagood", level: "populaire" },
-    ];
-  } catch {
-    return [
-      { tag: "#reels", level: "🔥 très populaire" },
-      { tag: "#viral", level: "🔥 très populaire" },
-      { tag: "#trending", level: "populaire" },
-    ];
-  }
+  // Fallback: curated always-trending TikTok tags
+  return [
+    { tag: "#pourtoi", views: "🔥 permanent" },
+    { tag: "#viral", views: "🔥 permanent" },
+    { tag: "#fyp", views: "🔥 permanent" },
+    { tag: "#foryoupage", views: "populaire" },
+    { tag: "#trending", views: "populaire" },
+    { tag: "#tiktok", views: "populaire" },
+  ];
 }
 
-/* ── Google Trends France ── */
+/* ────────────────────────────────────────
+   GOOGLE TRENDS — via RSS (plus fiable que l'API JSON)
+──────────────────────────────────────── */
 async function googleTrends(): Promise<{ query: string; traffic: string }[]> {
+  // Method 1: RSS feed (most reliable, no auth needed)
   const res = await safeFetch(
+    "https://trends.google.com/trending/rss?geo=FR",
+    { headers: { Accept: "application/rss+xml, text/xml, */*" } }
+  );
+  if (res) {
+    try {
+      const xml = await res.text();
+      const titles = [...xml.matchAll(/<title><!\[CDATA\[([^\]]+)\]\]><\/title>/g)]
+        .map(m => m[1].trim())
+        .filter(t => t.length > 2 && t !== "Google Trends");
+
+      const traffic = [...xml.matchAll(/<ht:approx_traffic>([^<]+)<\/ht:approx_traffic>/g)]
+        .map(m => m[1].trim());
+
+      if (titles.length > 0) {
+        return titles.slice(0, 8).map((q, i) => ({
+          query: q,
+          traffic: traffic[i] ?? "trending",
+        }));
+      }
+    } catch { /* continue */ }
+  }
+
+  // Method 2: Daily trends JSON API
+  const res2 = await safeFetch(
     "https://trends.google.com/trends/api/dailytrends?hl=fr&tz=-60&geo=FR&ns=15",
     { headers: { Accept: "text/plain" } }
   );
-  if (!res) return [];
-  try {
-    const text = await res.text();
-    const json = JSON.parse(text.replace(/^\)\]\}',?\n/, ""));
-    return (
-      json?.default?.trendingSearchesDays?.[0]?.trendingSearches
+  if (res2) {
+    try {
+      const text = await res2.text();
+      const json = JSON.parse(text.replace(/^\)\]\}',?\n/, ""));
+      const results = json?.default?.trendingSearchesDays?.[0]?.trendingSearches
         ?.slice(0, 8)
         ?.map((t: { title?: { query?: string }; formattedTraffic?: string }) => ({
           query: t.title?.query ?? "",
           traffic: t.formattedTraffic ?? "trending",
         }))
-        .filter((t: { query: string }) => t.query.length > 0) ?? []
-    );
-  } catch { return []; }
+        .filter((t: { query: string }) => t.query.length > 0) ?? [];
+      if (results.length > 0) return results;
+    } catch { /* continue */ }
+  }
+
+  // Method 3: Google Trends via pytrends-style public endpoint
+  const res3 = await safeFetch(
+    "https://trends.google.com/trends/hottrends/visualize/internal/data"
+  );
+  if (res3) {
+    try {
+      const json = await res3.json();
+      const fr = json?.["FR"] ?? json?.["fr"] ?? [];
+      if (Array.isArray(fr) && fr.length > 0) {
+        return fr.slice(0, 8).map((q: string) => ({ query: q, traffic: "trending" }));
+      }
+    } catch { /* continue */ }
+  }
+
+  return [];
+}
+
+/* ────────────────────────────────────────
+   TWITTER/X — trends24.in
+──────────────────────────────────────── */
+async function twitterTrends(): Promise<{ tag: string; volume: string }[]> {
+  for (const geo of ["france", "worldwide"]) {
+    const res = await safeFetch(`https://trends24.in/${geo}/`, {
+      headers: { Accept: "text/html" },
+    });
+    if (!res) continue;
+    try {
+      const html = await res.text();
+
+      // Extract from trend-name spans
+      const byClass = [...html.matchAll(/class="trend-name[^"]*"[^>]*>([^<]{2,60})</g)]
+        .map(m => m[1].trim()).filter(t => t && isRealTag(t.startsWith("#") ? t : `#${t}`));
+      if (byClass.length > 0) {
+        return [...new Set(byClass)].slice(0, 8).map(t => ({ tag: t, volume: "tendance" }));
+      }
+
+      // Extract anchor text that looks like hashtags or short phrases
+      const anchors = [...html.matchAll(/<a[^>]+class="[^"]*trend[^"]*"[^>]*>([^<]{2,40})<\/a>/g)]
+        .map(m => m[1].trim()).filter(Boolean);
+      if (anchors.length > 0) {
+        return [...new Set(anchors)]
+          .filter(t => isRealTag(t.startsWith("#") ? t : `#${t}`))
+          .slice(0, 8)
+          .map(t => ({ tag: t, volume: "trending" }));
+      }
+    } catch { continue; }
+  }
+  return [];
+}
+
+/* ────────────────────────────────────────
+   INSTAGRAM — hashtags from Reddit
+──────────────────────────────────────── */
+async function instagramHashtags(): Promise<{ tag: string; level: string }[]> {
+  // Use Reddit r/Instagram for real trending topics
+  const res = await safeFetch(
+    "https://www.reddit.com/r/Instagram+InstagramMarketing/hot.json?limit=15&raw_json=1"
+  );
+  if (res) {
+    try {
+      const json = await res.json();
+      const posts = json?.data?.children ?? [];
+      const tags: string[] = [];
+      for (const post of posts) {
+        const title: string = post.data?.title ?? "";
+        const found = [...title.matchAll(/#([\w\u00C0-\u017E]{2,25})/g)].map(m => `#${m[1]}`);
+        found.filter(isRealTag).forEach(t => tags.push(t));
+      }
+      const unique = [...new Set(tags)].slice(0, 8);
+      if (unique.length >= 3) return unique.map(t => ({ tag: t, level: "populaire" }));
+    } catch { /* continue */ }
+  }
+
+  // Reliable curated fallback
+  return [
+    { tag: "#reels", level: "🔥 viral" },
+    { tag: "#explore", level: "🔥 viral" },
+    { tag: "#viral", level: "🔥 viral" },
+    { tag: "#trending", level: "populaire" },
+    { tag: "#contentcreator", level: "populaire" },
+    { tag: "#ugc", level: "populaire" },
+    { tag: "#instagood", level: "populaire" },
+    { tag: "#fyp", level: "populaire" },
+  ];
 }
 
 /* ── Main handler ── */
@@ -188,9 +237,8 @@ export async function GET() {
     month: "2-digit",
   });
 
-  const [tiktokTags, tiktokSnds, twitter, instagram, google] = await Promise.all([
-    tiktokHashtags(),
-    tiktokSounds(),
+  const [tiktok, twitter, instagram, google] = await Promise.all([
+    tiktokTrends(),
     twitterTrends(),
     instagramHashtags(),
     googleTrends(),
@@ -200,7 +248,7 @@ export async function GET() {
     {
       updatedAt: now,
       platforms: {
-        tiktok: { hashtags: tiktokTags, sounds: tiktokSnds },
+        tiktok: { hashtags: tiktok, sounds: [] },
         twitter: { trends: twitter },
         instagram: { hashtags: instagram },
         google: { trends: google },
