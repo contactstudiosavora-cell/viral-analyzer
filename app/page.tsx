@@ -888,8 +888,10 @@ function BonusSection({ bonus }: { bonus: any }) {
 }
 
 /* ─────────────────────────────────────────
-   ALERTES TENDANCES — auto-load component
+   ALERTES TENDANCES — auto-load + filtres
 ───────────────────────────────────────── */
+type AlertTab = "hashtags" | "tendances" | "contenu" | "sons";
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function AlertesPanel() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -897,99 +899,114 @@ function AlertesPanel() {
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [open, setOpen] = useState(true);
+  const [tab, setTab] = useState<AlertTab>("hashtags");
+  const [platformFilter, setPlatformFilter] = useState<string>("tiktok");
 
   const fetchAlerts = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch("/api/alerts");
-      const json = await res.json();
-      setData(json);
+      setData(await res.json());
       setLastRefresh(new Date());
     } catch { /* silent */ } finally {
       setLoading(false);
     }
   }, []);
 
-  // Load on mount + auto-refresh every 15 min
   useEffect(() => {
     fetchAlerts();
-    const interval = setInterval(fetchAlerts, 15 * 60 * 1000);
-    return () => clearInterval(interval);
+    const t = setInterval(fetchAlerts, 15 * 60 * 1000);
+    return () => clearInterval(t);
   }, [fetchAlerts]);
 
-  const minutesAgo = lastRefresh
-    ? Math.floor((Date.now() - lastRefresh.getTime()) / 60000)
-    : null;
+  const minutesAgo = lastRefresh ? Math.floor((Date.now() - lastRefresh.getTime()) / 60000) : null;
 
-  const platforms = [
-    {
-      key: "tiktok",
-      icon: "🎵",
-      label: "TikTok",
-      color: "#C9F019",
-      items: [
-        ...(data?.platforms?.tiktok?.hashtags?.map((h: { tag: string; views: string }) => ({
-          text: h.tag, sub: h.views, type: "tag",
-        })) ?? []),
-        ...(data?.platforms?.tiktok?.sounds?.map((s: { name: string; count: string }) => ({
-          text: s.name, sub: s.count, type: "sound",
-        })) ?? []),
-      ],
-    },
-    {
-      key: "instagram",
-      icon: "📸",
-      label: "Instagram",
-      color: "#e1306c",
-      items: data?.platforms?.instagram?.hashtags?.map((h: { tag: string; level: string }) => ({
-        text: h.tag, sub: h.level, type: "tag",
-      })) ?? [],
-    },
-    {
-      key: "twitter",
-      icon: "🐦",
-      label: "X / Twitter",
-      color: "#1d9bf0",
-      items: data?.platforms?.twitter?.trends?.map((t: { tag: string; volume: string }) => ({
-        text: t.tag, sub: t.volume, type: "trend",
-      })) ?? [],
-    },
-    {
-      key: "google",
-      icon: "🔍",
-      label: "Google Trends",
-      color: "#fbbc05",
-      items: data?.platforms?.google?.trends?.map((t: { query: string; traffic: string }) => ({
-        text: t.query, sub: t.traffic, type: "search",
-      })) ?? [],
-    },
+  const tabs: { id: AlertTab; label: string; icon: string }[] = [
+    { id: "hashtags", label: "Hashtags", icon: "#" },
+    { id: "tendances", label: "Tendances", icon: "📈" },
+    { id: "contenu", label: "Formats", icon: "🎬" },
+    { id: "sons", label: "Sons", icon: "🎵" },
   ];
+
+  const platformTabs = [
+    { id: "tiktok", icon: "🎵", label: "TikTok", color: "#C9F019" },
+    { id: "instagram", icon: "📸", label: "Instagram", color: "#e1306c" },
+    { id: "twitter", icon: "🐦", label: "X", color: "#1d9bf0" },
+    { id: "facebook", icon: "📘", label: "Facebook", color: "#1877f2" },
+  ];
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function renderItems(items: any[], emptyMsg = "Données indisponibles") {
+    if (!items || items.length === 0) return (
+      <p className="text-xs py-2" style={{ color: "rgba(26,26,16,0.3)" }}>{emptyMsg}</p>
+    );
+    return (
+      <div className="space-y-2">
+        {items.slice(0, 7).map((item, i) => (
+          <div key={i} className="flex items-start justify-between gap-3 py-1.5 border-b last:border-0"
+            style={{ borderColor: "rgba(26,26,16,0.05)" }}>
+            <div className="flex items-start gap-2.5 min-w-0">
+              <span className="w-5 h-5 rounded text-[10px] font-black flex items-center justify-center shrink-0 mt-0.5"
+                style={{ backgroundColor: platformTabs.find(p => p.id === platformFilter)?.color + "20",
+                  color: platformTabs.find(p => p.id === platformFilter)?.color }}>
+                {i + 1}
+              </span>
+              <span className="text-sm font-sans font-semibold leading-snug" style={{ color: C.olive }}>
+                {item.text ?? item.sujet ?? item.type ?? item.son ?? ""}
+              </span>
+            </div>
+            <span className="text-[10px] font-sans shrink-0 mt-0.5 text-right"
+              style={{ color: "rgba(26,26,16,0.38)" }}>
+              {item.sub ?? item.stat ?? item.perf ?? item.traffic ?? ""}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function getTabContent(): any[] {
+    if (!data) return [];
+    if (tab === "hashtags") {
+      const src = data.hashtags?.[platformFilter] ?? [];
+      return src.map((h: { tag: string; stat: string }) => ({ text: h.tag, sub: h.stat }));
+    }
+    if (tab === "tendances") {
+      if (platformFilter === "google") return (data.tendances?.google ?? []).map((t: { sujet: string; stat: string }) => ({ text: t.sujet, sub: t.stat }));
+      return (data.tendances?.social ?? []).map((t: { sujet: string; stat: string }) => ({ text: t.sujet, sub: t.stat }));
+    }
+    if (tab === "contenu") {
+      const src = data.typesContenu?.[platformFilter] ?? [];
+      return src.map((t: { type: string; perf: string; conseil: string }) => ({ text: t.type, sub: t.perf, conseil: t.conseil }));
+    }
+    if (tab === "sons") {
+      if (platformFilter === "tiktok") return (data.sons?.tiktok ?? []).map((s: { son: string; stat: string }) => ({ text: s.son, sub: s.stat }));
+      if (platformFilter === "instagram") return (data.sons?.instagram ?? []).map((s: { son: string; stat: string }) => ({ text: s.son, sub: s.stat }));
+      return (data.sons?.conseil ?? []).map((s: { son: string; stat: string }) => ({ text: s.son, sub: s.stat }));
+    }
+    return [];
+  }
 
   return (
     <div className="rounded-2xl overflow-hidden"
-      style={{ border: "1px solid rgba(26,26,16,0.08)", boxShadow: "0 1px 3px rgba(26,26,16,0.06)" }}>
+      style={{ border: "1px solid rgba(26,26,16,0.08)", boxShadow: "0 2px 12px rgba(26,26,16,0.06)" }}>
 
-      {/* Header */}
-      <button
-        onClick={() => setOpen((v) => !v)}
+      {/* ── Header ── */}
+      <button onClick={() => setOpen(v => !v)}
         className="w-full flex items-center justify-between px-5 py-4 cursor-pointer"
-        style={{ backgroundColor: C.olive }}
-      >
+        style={{ backgroundColor: C.olive }}>
         <div className="flex items-center gap-3">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
               style={{ backgroundColor: C.lime }} />
-            <span className="relative inline-flex rounded-full h-2 w-2"
-              style={{ backgroundColor: C.lime }} />
+            <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: C.lime }} />
           </span>
-          <span className="font-sans font-black text-sm uppercase tracking-widest"
-            style={{ color: C.cream }}>
+          <span className="font-sans font-black text-sm uppercase tracking-widest" style={{ color: C.cream }}>
             🔔 Alertes tendances
           </span>
           <span className="text-[10px] font-sans px-2 py-0.5 rounded-full font-bold uppercase tracking-wider"
-            style={{ backgroundColor: C.lime, color: C.olive }}>
-            LIVE
-          </span>
+            style={{ backgroundColor: C.lime, color: C.olive }}>LIVE</span>
         </div>
         <div className="flex items-center gap-3">
           {minutesAgo !== null && (
@@ -997,91 +1014,103 @@ function AlertesPanel() {
               {minutesAgo === 0 ? "à l'instant" : `il y a ${minutesAgo} min`}
             </span>
           )}
-          <button
-            onClick={(e) => { e.stopPropagation(); fetchAlerts(); }}
-            className="text-[11px] font-sans font-bold px-2.5 py-1 rounded-lg transition-all"
-            style={{ backgroundColor: "rgba(255,255,255,0.08)", color: "rgba(233,229,218,0.6)" }}
-          >
+          <button onClick={e => { e.stopPropagation(); fetchAlerts(); }}
+            className="text-sm px-2.5 py-1 rounded-lg font-bold transition-all"
+            style={{ backgroundColor: "rgba(255,255,255,0.08)", color: "rgba(233,229,218,0.5)" }}>
             ↻
           </button>
-          <span className="text-sm" style={{ color: "rgba(233,229,218,0.4)" }}>
-            {open ? "▲" : "▼"}
-          </span>
+          <span className="text-xs" style={{ color: "rgba(233,229,218,0.4)" }}>{open ? "▲" : "▼"}</span>
         </div>
       </button>
 
-      {/* Body */}
       {open && (
         <div style={{ backgroundColor: C.white }}>
-          {loading && !data ? (
-            <div className="flex items-center justify-center gap-3 py-10">
-              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none"
-                style={{ color: C.olive }}>
-                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3"
-                  strokeDasharray="30 70" />
-              </svg>
-              <span className="text-sm font-sans" style={{ color: "rgba(26,26,16,0.4)" }}>
-                Collecte des tendances en cours...
-              </span>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-px"
-              style={{ backgroundColor: "rgba(26,26,16,0.06)" }}>
-              {platforms.map((p) => (
-                <div key={p.key} className="p-5" style={{ backgroundColor: C.white }}>
-                  {/* Platform header */}
-                  <div className="flex items-center gap-2 mb-4">
-                    <span className="text-base">{p.icon}</span>
-                    <span className="text-[11px] font-sans font-black uppercase tracking-[0.18em]"
-                      style={{ color: "rgba(26,26,16,0.5)" }}>
-                      {p.label}
-                    </span>
-                    <div className="h-px flex-1" style={{ backgroundColor: "rgba(26,26,16,0.08)" }} />
-                  </div>
+          {/* ── Category tabs ── */}
+          <div className="flex border-b overflow-x-auto" style={{ borderColor: "rgba(26,26,16,0.07)" }}>
+            {tabs.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)}
+                className="flex items-center gap-1.5 px-4 py-3 text-xs font-sans font-bold whitespace-nowrap transition-all cursor-pointer border-b-2"
+                style={{
+                  borderColor: tab === t.id ? C.olive : "transparent",
+                  color: tab === t.id ? C.olive : "rgba(26,26,16,0.4)",
+                  backgroundColor: "transparent",
+                }}>
+                <span>{t.icon}</span>
+                {t.label}
+              </button>
+            ))}
+          </div>
 
-                  {/* Items */}
-                  {p.items.length === 0 ? (
-                    <p className="text-xs" style={{ color: "rgba(26,26,16,0.3)" }}>
-                      Données indisponibles
-                    </p>
-                  ) : (
-                    <div className="space-y-1.5">
-                      {p.items.slice(0, 6).map((item: { text: string; sub: string; type: string }, i: number) => (
-                        <div key={i} className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span
-                              className="w-4 h-4 rounded flex items-center justify-center text-[9px] font-black shrink-0"
-                              style={{ backgroundColor: p.color + "20", color: p.color }}
-                            >
-                              {i + 1}
-                            </span>
-                            <span className="text-xs font-sans font-semibold truncate"
-                              style={{ color: C.olive }}>
-                              {item.text}
-                            </span>
-                          </div>
-                          <span className="text-[10px] font-sans shrink-0"
-                            style={{ color: "rgba(26,26,16,0.35)" }}>
-                            {item.sub}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+          {/* ── Platform filter ── */}
+          <div className="flex gap-2 px-4 py-3 border-b overflow-x-auto" style={{ borderColor: "rgba(26,26,16,0.07)", backgroundColor: C.cream }}>
+            {platformTabs
+              .filter(p => !(tab === "hashtags" && p.id === "facebook")) // FB has no hashtag data
+              .map(p => (
+                <button key={p.id} onClick={() => setPlatformFilter(p.id)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-sans font-bold transition-all cursor-pointer whitespace-nowrap"
+                  style={platformFilter === p.id
+                    ? { backgroundColor: C.olive, color: C.lime }
+                    : { backgroundColor: C.white, color: "rgba(26,26,16,0.5)", border: "1px solid rgba(26,26,16,0.1)" }}>
+                  {p.icon} {p.label}
+                </button>
               ))}
-            </div>
-          )}
+            {tab === "tendances" && (
+              <button onClick={() => setPlatformFilter("google")}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-sans font-bold transition-all cursor-pointer whitespace-nowrap"
+                style={platformFilter === "google"
+                  ? { backgroundColor: C.olive, color: C.lime }
+                  : { backgroundColor: C.white, color: "rgba(26,26,16,0.5)", border: "1px solid rgba(26,26,16,0.1)" }}>
+                🔍 Google
+              </button>
+            )}
+          </div>
 
-          {/* Footer */}
+          {/* ── Content ── */}
+          <div className="px-5 py-4 min-h-[180px]">
+            {loading && !data ? (
+              <div className="flex items-center justify-center gap-3 py-10">
+                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" style={{ color: C.olive }}>
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeDasharray="30 70" />
+                </svg>
+                <span className="text-sm font-sans" style={{ color: "rgba(26,26,16,0.4)" }}>
+                  Collecte en cours...
+                </span>
+              </div>
+            ) : (
+              <>
+                {/* Conseil spécial pour l'onglet Formats */}
+                {tab === "contenu" && (
+                  <p className="text-[10px] font-sans mb-3 px-1" style={{ color: "rgba(26,26,16,0.4)" }}>
+                    Types de contenu classés par portée organique actuelle
+                  </p>
+                )}
+                {renderItems(getTabContent())}
+                {/* Conseil détaillé pour formats */}
+                {tab === "contenu" && getTabContent().length > 0 && (
+                  <div className="mt-3 space-y-1.5">
+                    {getTabContent().slice(0, 5).map((item: { text: string; conseil?: string }, i: number) =>
+                      item.conseil ? (
+                        <div key={i} className="text-[11px] px-3 py-2 rounded-lg"
+                          style={{ backgroundColor: C.cream, color: "rgba(26,26,16,0.55)" }}>
+                          💡 <strong>{item.text.split(" ").slice(1).join(" ")}</strong> : {item.conseil}
+                        </div>
+                      ) : null
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* ── Footer ── */}
           {data && (
             <div className="px-5 py-3 border-t flex items-center justify-between"
-              style={{ borderColor: "rgba(26,26,16,0.06)" }}>
+              style={{ borderColor: "rgba(26,26,16,0.06)", backgroundColor: C.cream }}>
               <p className="text-[10px] font-sans" style={{ color: "rgba(26,26,16,0.3)" }}>
-                Sources : TikTok Creative Center · trends24.in · top-hashtags.com · Google Trends
+                Google Trends · Reddit · trends24.in · TikTok Creative Center
               </p>
-              <p className="text-[10px] font-sans font-bold" style={{ color: "rgba(26,26,16,0.3)" }}>
-                ↻ toutes les 15 min
+              <p className="text-[10px] font-sans font-bold" style={{ color: "rgba(26,26,16,0.35)" }}>
+                ↻ 15 min
               </p>
             </div>
           )}
