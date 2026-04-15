@@ -973,17 +973,16 @@ function AlertesPanel() {
       return src.map((h: { tag: string; stat: string }) => ({ text: h.tag, sub: h.stat }));
     }
     if (tab === "tendances") {
-      if (platformFilter === "google") return (data.tendances?.google ?? []).map((t: { sujet: string; stat: string }) => ({ text: t.sujet, sub: t.stat }));
-      return (data.tendances?.social ?? []).map((t: { sujet: string; stat: string }) => ({ text: t.sujet, sub: t.stat }));
+      const src = data.tendances?.[platformFilter] ?? data.tendances?.general ?? [];
+      return src.map((t: { sujet: string; stat: string }) => ({ text: t.sujet, sub: t.stat }));
     }
     if (tab === "contenu") {
       const src = data.typesContenu?.[platformFilter] ?? [];
       return src.map((t: { type: string; perf: string; conseil: string }) => ({ text: t.type, sub: t.perf, conseil: t.conseil }));
     }
     if (tab === "sons") {
-      if (platformFilter === "tiktok") return (data.sons?.tiktok ?? []).map((s: { son: string; stat: string }) => ({ text: s.son, sub: s.stat }));
-      if (platformFilter === "instagram") return (data.sons?.instagram ?? []).map((s: { son: string; stat: string }) => ({ text: s.son, sub: s.stat }));
-      return (data.sons?.conseil ?? []).map((s: { son: string; stat: string }) => ({ text: s.son, sub: s.stat }));
+      const src = data.sons?.[platformFilter] ?? data.sons?.conseils ?? [];
+      return src.map((s: { son: string; stat: string }) => ({ text: s.son, sub: s.stat }));
     }
     return [];
   }

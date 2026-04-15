@@ -32,53 +32,130 @@ function isRealTag(tag: string): boolean {
   return true;
 }
 
-/* ── Reddit helper ── */
-async function redditHot(sub: string, limit = 10): Promise<{ title: string; score: number; url: string }[]> {
+async function redditHot(sub: string, limit = 10): Promise<{ title: string; score: number }[]> {
   const res = await safeFetch(`https://www.reddit.com/r/${sub}/hot.json?limit=${limit}&raw_json=1`);
   if (!res) return [];
   try {
     const json = await res.json();
-    return json?.data?.children?.map((c: { data?: { title?: string; score?: number; url?: string } }) => ({
+    return json?.data?.children?.map((c: { data?: { title?: string; score?: number } }) => ({
       title: c.data?.title ?? "",
       score: c.data?.score ?? 0,
-      url: c.data?.url ?? "",
-    })).filter((p: { title: string }) => p.title) ?? [];
+    })).filter((p: { title: string }) => p.title.length > 5) ?? [];
   } catch { return []; }
+}
+
+/* ════════════════════════════════════════
+   GOOGLE TRENDS — RSS France
+════════════════════════════════════════ */
+async function fetchGoogleTrends(): Promise<{ sujet: string; stat: string }[]> {
+  const res = await safeFetch(
+    "https://trends.google.com/trending/rss?geo=FR",
+    { headers: { Accept: "application/rss+xml, text/xml, */*" } }
+  );
+  if (res) {
+    try {
+      const xml = await res.text();
+      const titles = [...xml.matchAll(/<title><!\[CDATA\[([^\]]+)\]\]><\/title>/g)]
+        .map(m => m[1].trim()).filter(t => t !== "Google Trends" && t.length > 2);
+      const traffic = [...xml.matchAll(/<ht:approx_traffic>([^<]+)<\/ht:approx_traffic>/g)]
+        .map(m => m[1].trim());
+      if (titles.length > 0) {
+        return titles.slice(0, 10).map((s, i) => ({ sujet: s, stat: traffic[i] ?? "trending" }));
+      }
+    } catch { /* continue */ }
+  }
+
+  // Fallback: daily trends JSON
+  const res2 = await safeFetch(
+    "https://trends.google.com/trends/api/dailytrends?hl=fr&tz=-60&geo=FR&ns=15",
+    { headers: { Accept: "text/plain" } }
+  );
+  if (res2) {
+    try {
+      const text = await res2.text();
+      const json = JSON.parse(text.replace(/^\)\]\}',?\n/, ""));
+      const results = json?.default?.trendingSearchesDays?.[0]?.trendingSearches
+        ?.slice(0, 10)
+        ?.map((t: { title?: { query?: string }; formattedTraffic?: string }) => ({
+          sujet: t.title?.query ?? "",
+          stat: t.formattedTraffic ?? "trending",
+        }))
+        .filter((t: { sujet: string }) => t.sujet.length > 0) ?? [];
+      if (results.length > 0) return results;
+    } catch { /* continue */ }
+  }
+
+  return [];
+}
+
+/* ════════════════════════════════════════
+   TENDANCES PAR PLATEFORME
+════════════════════════════════════════ */
+async function fetchTendances() {
+  const [googleData, redditTiktok, redditInsta, redditTwitter, redditFb, redditGeneral] = await Promise.all([
+    fetchGoogleTrends(),
+    redditHot("TikTok+TikTokTips", 12),
+    redditHot("Instagram+InstagramMarketing+reels", 12),
+    redditHot("twitter+Twittermarketing", 10),
+    redditHot("facebook+FacebookMarketing", 10),
+    redditHot("socialmediamarketing+contentcreation+contentmarketing", 12),
+  ]);
+
+  const toItems = (posts: { title: string; score: number }[]) =>
+    posts.sort((a, b) => b.score - a.score)
+      .slice(0, 8)
+      .map(p => ({ sujet: p.title.length > 60 ? p.title.slice(0, 60) + "…" : p.title, stat: fmt(p.score) + " pts" }));
+
+  const tiktokItems = toItems(redditTiktok);
+  const instaItems = toItems(redditInsta);
+  const twitterItems = toItems(redditTwitter);
+  const fbItems = toItems(redditFb);
+  const generalItems = toItems(redditGeneral);
+
+  return {
+    google: googleData,
+    tiktok: tiktokItems.length > 0 ? tiktokItems : googleData.slice(0, 5),
+    instagram: instaItems.length > 0 ? instaItems : googleData.slice(0, 5),
+    twitter: twitterItems.length > 0 ? twitterItems : googleData.slice(0, 5),
+    facebook: fbItems.length > 0 ? fbItems : generalItems.slice(0, 5),
+    general: generalItems.length > 0 ? generalItems : googleData.slice(0, 5),
+  };
 }
 
 /* ════════════════════════════════════════
    HASHTAGS
 ════════════════════════════════════════ */
-async function fetchHashtags(): Promise<Record<string, { tag: string; stat: string }[]>> {
-  const [tiktokReddit, instaReddit, twitterRes] = await Promise.all([
+async function fetchHashtags() {
+  const [redditTiktok, redditInsta, twitterRes] = await Promise.all([
     redditHot("TikTok", 15),
     redditHot("Instagram+InstagramMarketing", 12),
     safeFetch("https://trends24.in/france/", { headers: { Accept: "text/html" } }),
   ]);
 
-  // TikTok hashtags from Reddit posts
+  // TikTok
   const tiktokTags: { tag: string; stat: string }[] = [];
-  for (const p of tiktokReddit) {
+  for (const p of redditTiktok) {
     [...p.title.matchAll(/#([\w\u00C0-\u017E]{2,25})/g)]
       .map(m => `#${m[1]}`).filter(isRealTag)
       .forEach(t => tiktokTags.push({ tag: t, stat: fmt(p.score) + " pts" }));
   }
-  const tiktok = tiktokTags.length >= 3
+  const tiktok = tiktokTags.length >= 4
     ? [...new Map(tiktokTags.map(t => [t.tag, t])).values()].slice(0, 8)
     : [
         { tag: "#pourtoi", stat: "🔥 viral" }, { tag: "#fyp", stat: "🔥 viral" },
         { tag: "#viral", stat: "🔥 viral" }, { tag: "#foryoupage", stat: "populaire" },
         { tag: "#trending", stat: "populaire" }, { tag: "#tiktok", stat: "populaire" },
+        { tag: "#contentcreator", stat: "populaire" }, { tag: "#ugc", stat: "populaire" },
       ];
 
-  // Instagram hashtags
+  // Instagram
   const instaTags: { tag: string; stat: string }[] = [];
-  for (const p of instaReddit) {
+  for (const p of redditInsta) {
     [...p.title.matchAll(/#([\w\u00C0-\u017E]{2,25})/g)]
       .map(m => `#${m[1]}`).filter(isRealTag)
       .forEach(t => instaTags.push({ tag: t, stat: "populaire" }));
   }
-  const instagram = instaTags.length >= 3
+  const instagram = instaTags.length >= 4
     ? [...new Set(instaTags.map(t => t.tag))].slice(0, 8).map(t => ({ tag: t, stat: "populaire" }))
     : [
         { tag: "#reels", stat: "🔥 viral" }, { tag: "#explore", stat: "🔥 viral" },
@@ -93,14 +170,14 @@ async function fetchHashtags(): Promise<Record<string, { tag: string; stat: stri
     try {
       const html = await twitterRes.text();
       const byClass = [...html.matchAll(/class="trend-name[^"]*"[^>]*>([^<]{2,60})</g)]
-        .map(m => m[1].trim()).filter(t => isRealTag(t.startsWith("#") ? t : `#fake${t}`));
-      twitter = [...new Set(byClass)].slice(0, 8).map(t => ({ tag: t, stat: "tendance" }));
+        .map(m => m[1].trim()).filter(t => isRealTag(t.startsWith("#") ? t : `#x${t}`));
+      if (byClass.length > 0) twitter = [...new Set(byClass)].slice(0, 8).map(t => ({ tag: t, stat: "tendance" }));
     } catch { /* continue */ }
   }
   if (twitter.length === 0) {
     twitter = [
-      { tag: "#KohLanta", stat: "tendance" }, { tag: "#PSG", stat: "tendance" },
-      { tag: "#ChatGPT", stat: "tendance" }, { tag: "#IA", stat: "tendance" },
+      { tag: "#IA", stat: "tendance" }, { tag: "#Tech", stat: "tendance" },
+      { tag: "#Marketing", stat: "tendance" }, { tag: "#Réseaux", stat: "tendance" },
     ];
   }
 
@@ -108,80 +185,51 @@ async function fetchHashtags(): Promise<Record<string, { tag: string; stat: stri
 }
 
 /* ════════════════════════════════════════
-   TENDANCES DU MOMENT (Google RSS + Reddit discussions)
+   FORMATS / TYPES DE CONTENU
 ════════════════════════════════════════ */
-async function fetchTendances(): Promise<Record<string, { sujet: string; stat: string }[]>> {
-  const [googleRss, redditSocial, redditMarketing] = await Promise.all([
-    safeFetch("https://trends.google.com/trending/rss?geo=FR", { headers: { Accept: "application/rss+xml, text/xml, */*" } }),
-    redditHot("socialmedia+socialmediamarketing", 10),
-    redditHot("contentcreation+contentmarketing", 10),
-  ]);
-
-  // Google RSS
-  let google: { sujet: string; stat: string }[] = [];
-  if (googleRss) {
-    try {
-      const xml = await googleRss.text();
-      const titles = [...xml.matchAll(/<title><!\[CDATA\[([^\]]+)\]\]><\/title>/g)]
-        .map(m => m[1].trim()).filter(t => t !== "Google Trends" && t.length > 2);
-      const traffic = [...xml.matchAll(/<ht:approx_traffic>([^<]+)<\/ht:approx_traffic>/g)]
-        .map(m => m[1].trim());
-      google = titles.slice(0, 8).map((s, i) => ({ sujet: s, stat: traffic[i] ?? "trending" }));
-    } catch { /* continue */ }
-  }
-
-  // Social media discussions
-  const social = [...redditSocial, ...redditMarketing]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 6)
-    .map(p => ({ sujet: p.title.slice(0, 55) + (p.title.length > 55 ? "…" : ""), stat: fmt(p.score) + " pts" }));
-
-  return { google, social };
-}
-
-/* ════════════════════════════════════════
-   TYPES DE CONTENU QUI MARCHENT (par plateforme)
-════════════════════════════════════════ */
-async function fetchTypesContenu(): Promise<Record<string, { type: string; perf: string; conseil: string }[]>> {
-  // These are based on platform algorithm data — always current
+function fetchTypesContenu() {
   return {
     tiktok: [
-      { type: "🎬 Vidéo courte 7-15s", perf: "🔥 Portée max", conseil: "Hook dans la 1ère seconde" },
-      { type: "🎬 Vidéo 30-60s", perf: "📈 Très bon", conseil: "Storytelling + twist final" },
-      { type: "🎬 Série / Part 2", perf: "📈 Très bon", conseil: "Génère des commentaires & attente" },
-      { type: "🔴 Live", perf: "💡 Boost algo", conseil: "Min. 30 min pour le boost" },
-      { type: "📸 Photo carousel", perf: "📊 Moyen", conseil: "Moins poussé que la vidéo" },
+      { type: "🎬 Vidéo 7-15s", perf: "🔥 Portée maximale", conseil: "Hook dans la 1ère seconde, pas de générique" },
+      { type: "🎬 Vidéo 30-60s", perf: "📈 Très bon", conseil: "Storytelling + twist ou révélation finale" },
+      { type: "🎬 Série / Part 2…", perf: "📈 Très bon", conseil: "Génère de l'attente et des commentaires" },
+      { type: "🎬 Duet / Stitch", perf: "💡 Boost reach", conseil: "Réagir à un contenu viral existant" },
+      { type: "🔴 Live", perf: "💡 Boost algo", conseil: "Minimum 30 min pour déclencher le boost" },
+      { type: "📸 Photo carousel", perf: "📊 Moyen", conseil: "Moins poussé que la vidéo sur TikTok" },
     ],
     instagram: [
-      { type: "🎬 Reels 7-15s", perf: "🔥 Portée max", conseil: "Première frame ultra-accrocheuse" },
-      { type: "🎬 Reels 30-60s", perf: "📈 Très bon", conseil: "Sous-titres obligatoires" },
-      { type: "📸 Carousel 5-10 slides", perf: "📈 Très bon", conseil: "Slide 1 = hook visuel fort" },
-      { type: "📸 Photo seule", perf: "📊 Moyen", conseil: "Fonctionne sur abonnés existants" },
-      { type: "🔴 Live", perf: "💡 Boost algo", conseil: "Notifie tes abonnés avant" },
+      { type: "🎬 Reels 7-15s", perf: "🔥 Portée maximale", conseil: "Première frame ultra-accrocheuse" },
+      { type: "🎬 Reels 30-60s", perf: "📈 Très bon", conseil: "Sous-titres obligatoires, 80% regardent sans son" },
+      { type: "📸 Carousel 5-10 slides", perf: "📈 Très bon", conseil: "Slide 1 = hook visuel, dernière slide = CTA" },
+      { type: "📸 Photo seule", perf: "📊 Moyen", conseil: "Fonctionne surtout pour les abonnés existants" },
+      { type: "💬 Stories interactives", perf: "💡 Engagement", conseil: "Sondage + question = boost algorithme" },
+      { type: "🔴 Live", perf: "💡 Boost algo", conseil: "Notifie tes abonnés 24h avant" },
     ],
     facebook: [
-      { type: "🎬 Reels / Vidéo courte", perf: "🔥 Portée max", conseil: "Privilégier le format vertical" },
-      { type: "🎬 Vidéo native 1-3 min", perf: "📈 Très bon", conseil: "Upload direct, pas de lien YouTube" },
-      { type: "📸 Carousel produit", perf: "📈 Bon", conseil: "Idéal pour e-commerce" },
-      { type: "📝 Post texte court", perf: "📊 Moyen", conseil: "Question = engagement" },
-      { type: "🔴 Facebook Live", perf: "💡 Boost algo", conseil: "Booste la portée organique" },
+      { type: "🎬 Reels / Vidéo courte", perf: "🔥 Portée maximale", conseil: "Format vertical, upload direct sur Facebook" },
+      { type: "🎬 Vidéo native 1-3 min", perf: "📈 Très bon", conseil: "Upload direct, jamais un lien YouTube" },
+      { type: "📸 Carousel produit", perf: "📈 Bon", conseil: "Idéal e-commerce, 3-5 visuels max" },
+      { type: "📝 Post texte + question", perf: "💡 Engagement", conseil: "Question simple = maximum de commentaires" },
+      { type: "🔴 Facebook Live", perf: "💡 Boost algo", conseil: "Booste la portée organique sur les Pages" },
+      { type: "🎉 Event Facebook", perf: "📊 Niche", conseil: "Utile pour communautés et événements locaux" },
     ],
     twitter: [
-      { type: "🎬 Vidéo native 30-90s", perf: "🔥 Portée max", conseil: "Caption forte sans son" },
-      { type: "🧵 Thread 5-10 tweets", perf: "📈 Très bon", conseil: "Hook tweet 1, valeur dans les suivants" },
-      { type: "📸 Tweet + image", perf: "📈 Bon", conseil: "Image = +35% d'engagement" },
-      { type: "📊 Sondage", perf: "💡 Engagement", conseil: "2 options tranchées pour plus de votes" },
-      { type: "📝 Tweet texte seul", perf: "📊 Dépend", conseil: "Fonctionne si compte déjà établi" },
+      { type: "🎬 Vidéo native 30-90s", perf: "🔥 Portée maximale", conseil: "Caption forte, caption sans son obligatoire" },
+      { type: "🧵 Thread 5-10 tweets", perf: "📈 Très bon", conseil: "Tweet 1 = hook, valeur dans les suivants" },
+      { type: "📸 Tweet + image", perf: "📈 Bon", conseil: "+35% d'engagement avec une image pertinente" },
+      { type: "📊 Sondage", perf: "💡 Engagement", conseil: "2 options tranchées pour maximiser les votes" },
+      { type: "📝 Tweet texte seul", perf: "📊 Variable", conseil: "Fonctionne si compte déjà établi et suivi" },
+      { type: "🔁 Quote Tweet viral", perf: "💡 Reach", conseil: "Ajouter de la valeur à un tweet viral existant" },
     ],
   };
 }
 
 /* ════════════════════════════════════════
-   SONS / MUSIQUES TRENDING
+   SONS
 ════════════════════════════════════════ */
-async function fetchSons(): Promise<Record<string, { son: string; stat: string }[]>> {
-  // TikWM for TikTok trending sounds
+async function fetchSons() {
   const tiktokSounds: { son: string; stat: string }[] = [];
+
   const res = await safeFetch(
     "https://ads.tiktok.com/creative_radar_api/v1/popular_trend/sound/list?period=7&page=1&limit=8&country_code=US",
     { headers: { Referer: "https://ads.tiktok.com/business/creativecenter/trends/sound/pc/en" } }
@@ -198,28 +246,36 @@ async function fetchSons(): Promise<Record<string, { son: string; stat: string }
     } catch { /* continue */ }
   }
 
-  // Fallback: Reddit for trending audio discussions
-  if (tiktokSounds.length === 0) {
-    const posts = await redditHot("tiktokmusic+TikTok", 10);
-    posts.slice(0, 5).forEach(p => {
-      if (p.title.length > 5) tiktokSounds.push({ son: p.title.slice(0, 50), stat: fmt(p.score) + " pts" });
-    });
-  }
+  const fallbackSounds = tiktokSounds.length === 0 ? [
+    { son: "Son original (créé par toi)", stat: "🔥 Favorisé par l'algo" },
+    { son: "Remix d'un son viral récent", stat: "📈 Très bon reach" },
+    { son: "Audio populaire suggéré", stat: "Utilise les suggestions TikTok" },
+    { son: "Silence / voix seule", stat: "💡 Pour contenu éducatif" },
+  ] : tiktokSounds;
 
   return {
-    tiktok: tiktokSounds.length > 0 ? tiktokSounds : [
-      { son: "Son original tendance", stat: "🔥 boost algo" },
-      { son: "Remix viral du moment", stat: "populaire" },
-    ],
+    tiktok: fallbackSounds,
     instagram: [
-      { son: "Sons populaires Reels", stat: "Utilise les sons suggérés par Instagram" },
-      { son: "Audio original", stat: "🔥 Favorisé par l'algorithme" },
-      { son: "Trending depuis TikTok", stat: "Migration fréquente vers Reels" },
+      { son: "Son original de Reels", stat: "🔥 Favorisé par Instagram" },
+      { son: "Audio trending suggéré", stat: "Vérifie la section 'Populaire'" },
+      { son: "Migration depuis TikTok", stat: "Sons viraux TikTok → Reels" },
+      { son: "Musique libre de droits", stat: "Évite les suppressions de vidéo" },
     ],
-    conseil: [
-      { son: "🎵 Son original = boost algorithme", stat: "Sur TikTok et Instagram Reels" },
-      { son: "🎵 Sons < 15s = meilleure rétention", stat: "Coupe sur le beat" },
-      { son: "🎵 Silence dramatique", stat: "Très efficace sur les reveals" },
+    facebook: [
+      { son: "Son original / voix", stat: "🔥 Meilleure portée organique" },
+      { son: "Musique Meta Sound Collection", stat: "Libre de droits, sans risque" },
+      { son: "Son viral TikTok adapté", stat: "Migration courante vers Reels FB" },
+    ],
+    twitter: [
+      { son: "Vidéo silencieuse + sous-titres", stat: "🔥 80% regardent sans son" },
+      { son: "Son ambiance / musique douce", stat: "Pour les vidéos courtes < 30s" },
+      { son: "Voix seule claire", stat: "💡 Pour contenu explicatif" },
+    ],
+    conseils: [
+      { son: "🎵 Son original = boost algorithme", stat: "TikTok et Reels Instagram" },
+      { son: "🎵 Sons < 15s = meilleure rétention", stat: "Coupe toujours sur le beat" },
+      { son: "🎵 Silence dramatique avant reveal", stat: "Très efficace sur les annonces" },
+      { son: "🎵 Voix naturelle non scriptée", stat: "Plus authentique = plus d'engagement" },
     ],
   };
 }
@@ -232,12 +288,13 @@ export async function GET() {
     day: "2-digit", month: "2-digit",
   });
 
-  const [hashtags, tendances, typesContenu, sons] = await Promise.all([
+  const [hashtags, tendances, sons] = await Promise.all([
     fetchHashtags(),
     fetchTendances(),
-    fetchTypesContenu(),
     fetchSons(),
   ]);
+
+  const typesContenu = fetchTypesContenu();
 
   return NextResponse.json(
     { updatedAt: now, hashtags, tendances, typesContenu, sons },
